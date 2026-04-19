@@ -213,7 +213,7 @@ SUBSCRIBE_MSG = """訂閱進階版英文機器人
 
 付款後請將截圖傳送至 LINE ID：a0970801250，並告知您的 LINE ID（傳「我的ID」可查詢），確認後將為您開通進階版。
 
-進階版功能：每月 200 題（免費版每天 7 題）"""
+進階版功能：每月 200 則訊息，用完後自動降回每日 14 則免費版，下月自動重置。"""
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
