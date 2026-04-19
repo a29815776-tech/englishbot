@@ -31,7 +31,7 @@ PAID_USER_IDS = set(uid.strip() for uid in os.environ.get("PAID_USER_IDS", "").s
 ADMIN_LINE_ID = os.environ.get("ADMIN_LINE_ID", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 MONTHLY_QUOTA = 200
-FREE_DAILY_QUOTA = 7
+FREE_DAILY_QUOTA = 14
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
