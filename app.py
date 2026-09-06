@@ -1,4 +1,4 @@
-from flask import Flask, request, abort
+from flask import Flask, request, abort, Response
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, ImageMessage, TextSendMessage
@@ -383,6 +383,272 @@ def handle_image(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     except Exception as e:
         logger.error(f"LINE reply error: {e}\n{traceback.format_exc()}")
+
+# ---------------------------------------------------------------------------
+# 網頁測試模擬器：不經過 LINE，直接在瀏覽器測試 bot
+# 需要設定環境變數 SIMULATOR_TOKEN 才會啟用，避免 AI 端點被公開濫用
+# ---------------------------------------------------------------------------
+
+SIMULATOR_TOKEN = os.environ.get("SIMULATOR_TOKEN", "")
+
+
+def json_response(payload, status=200):
+    # ensure_ascii=False + 明確 charset，中文才不會變成 \uXXXX 或亂碼
+    return Response(
+        json.dumps(payload, ensure_ascii=False),
+        status=status,
+        content_type="application/json; charset=utf-8"
+    )
+
+
+def simulator_authorized():
+    if not SIMULATOR_TOKEN:
+        return False
+    token = request.args.get("token") or request.headers.get("X-Simulator-Token", "")
+    return token == SIMULATOR_TOKEN
+
+
+SIMULATOR_HTML = """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>英文機器人 測試模擬器</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #f4f5f7; color: #1c1c1e;
+    font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC", sans-serif;
+  }
+  header {
+    padding: 12px 16px; background: #06c755; color: #fff; font-weight: 600;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  header button {
+    background: rgba(255,255,255,.2); color: #fff; border: 0; border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  #log { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 16px; margin-bottom: 12px;
+         white-space: pre-wrap; word-wrap: break-word; line-height: 1.6; }
+  .user { background: #06c755; color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
+  .bot  { background: #fff; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .err  { background: #ffe5e5; color: #b00020; }
+  .msg img { display: block; max-width: 220px; border-radius: 10px; margin-bottom: 6px; }
+  footer { padding: 12px; background: #fff; border-top: 1px solid #e2e2e5; }
+  .row { display: flex; gap: 8px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; border: 1px solid #d4d4d8; border-radius: 18px;
+    padding: 10px 14px; font: inherit; line-height: 1.5; max-height: 140px;
+  }
+  textarea:focus { outline: 2px solid #06c755; outline-offset: -1px; }
+  .btn { border: 0; border-radius: 18px; padding: 10px 18px; font: inherit;
+         background: #06c755; color: #fff; cursor: pointer; }
+  .btn:disabled { background: #b7b7bb; cursor: default; }
+  .icon { background: #f0f0f2; color: #444; padding: 10px 12px; }
+  #preview { display: none; margin-bottom: 8px; font-size: 13px; color: #555; }
+  #preview img { max-height: 60px; border-radius: 6px; vertical-align: middle; margin-right: 8px; }
+  .hint { font-size: 12px; color: #8a8a8e; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <span>英文機器人 · 測試模擬器</span>
+  <button id="clear">清除對話</button>
+</header>
+
+<div id="log"></div>
+
+<footer>
+  <div id="preview"></div>
+  <div class="row">
+    <button class="btn icon" id="pick" title="上傳題目照片">圖片</button>
+    <input type="file" id="file" accept="image/*" hidden>
+    <textarea id="input" rows="1" placeholder="輸入中文或英文問題，Enter 送出、Shift+Enter 換行"></textarea>
+    <button class="btn" id="send">送出</button>
+  </div>
+  <div class="hint">此頁不經過 LINE，也不會計入每日額度。</div>
+</footer>
+
+<script>
+const TOKEN = "__TOKEN__";
+const log = document.getElementById('log');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const fileInput = document.getElementById('file');
+const preview = document.getElementById('preview');
+let history = [];
+let pendingImage = null;
+let composing = false;   // 中文輸入法組字中
+
+function bubble(cls, text, imgSrc) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  if (imgSrc) {
+    const im = document.createElement('img');
+    im.src = imgSrc;
+    d.appendChild(im);
+  }
+  if (text) d.appendChild(document.createTextNode(text));
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+// 注音／拼音組字期間不可送出，否則會送出半個字或選字用的 Enter
+input.addEventListener('compositionstart', () => { composing = true; });
+input.addEventListener('compositionend', () => { composing = false; });
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !composing && !e.isComposing) {
+    e.preventDefault();
+    send();
+  }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+});
+
+document.getElementById('pick').onclick = () => fileInput.click();
+fileInput.onchange = () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  if (f.size > 4 * 1024 * 1024) { alert('圖片請小於 4MB'); fileInput.value = ''; return; }
+  const r = new FileReader();
+  r.onload = () => {
+    pendingImage = r.result;
+    preview.style.display = 'block';
+    preview.innerHTML = '';
+    const im = document.createElement('img');
+    im.src = pendingImage;
+    preview.appendChild(im);
+    const b = document.createElement('button');
+    b.textContent = '移除';
+    b.onclick = clearImage;
+    preview.appendChild(b);
+  };
+  r.readAsDataURL(f);
+};
+function clearImage() {
+  pendingImage = null;
+  fileInput.value = '';
+  preview.style.display = 'none';
+  preview.innerHTML = '';
+}
+
+document.getElementById('clear').onclick = () => {
+  history = [];
+  log.innerHTML = '';
+  clearImage();
+};
+
+async function send() {
+  const text = input.value.trim();
+  if (!text && !pendingImage) return;
+
+  bubble('user', text, pendingImage);
+  input.value = '';
+  input.style.height = 'auto';
+  sendBtn.disabled = true;
+
+  const image = pendingImage;
+  clearImage();
+
+  const thinking = bubble('bot', '思考中…');
+  try {
+    const res = await fetch('/simulator/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Simulator-Token': TOKEN },
+      body: JSON.stringify({ messages: history, message: text, image: image })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      thinking.className = 'msg err';
+      thinking.textContent = '錯誤：' + (data.error || res.status);
+      return;
+    }
+    thinking.textContent = data.reply;
+    history.push({ role: 'user', content: text || '（圖片）' });
+    history.push({ role: 'assistant', content: data.reply });
+  } catch (err) {
+    thinking.className = 'msg err';
+    thinking.textContent = '連線失敗：' + err;
+  } finally {
+    sendBtn.disabled = false;
+    input.focus();
+  }
+}
+sendBtn.onclick = send;
+input.focus();
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/simulator")
+def simulator_page():
+    if not SIMULATOR_TOKEN:
+        return Response(
+            "模擬器未啟用。請在環境變數設定 SIMULATOR_TOKEN 後再開啟 /simulator?token=你設定的值",
+            status=403,
+            content_type="text/plain; charset=utf-8"
+        )
+    if not simulator_authorized():
+        return Response("Token 不正確", status=403, content_type="text/plain; charset=utf-8")
+    return Response(
+        SIMULATOR_HTML.replace("__TOKEN__", SIMULATOR_TOKEN),
+        content_type="text/html; charset=utf-8"
+    )
+
+
+@app.route("/simulator/chat", methods=["POST"])
+def simulator_chat():
+    if not simulator_authorized():
+        return json_response({"error": "未授權"}, 403)
+
+    data = request.get_json(silent=True) or {}
+    text = (data.get("message") or "").strip()
+    image = data.get("image") or ""
+
+    if not text and not image:
+        return json_response({"error": "訊息為空"}, 400)
+
+    # 只接受合法的歷史紀錄格式，並沿用 LINE 端相同的長度限制
+    history = []
+    for item in data.get("messages", []):
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in ("user", "assistant") and isinstance(content, str):
+            history.append({"role": role, "content": content})
+    history = history[-MAX_HISTORY:]
+
+    if image:
+        if not image.startswith("data:image/"):
+            return json_response({"error": "圖片格式不支援"}, 400)
+        user_content = [
+            {"type": "text", "text": text or "請看這張圖片中的英文題目並解析。"},
+            {"type": "image_url", "image_url": {"url": image}}
+        ]
+    else:
+        user_content = text
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": user_content}
+    ]
+
+    try:
+        response = call_ai(FREE_MODEL, messages)
+        reply = clean_response(response.choices[0].message.content)[:4900]
+        logger.info(f"Simulator reply: {reply[:100]}")
+        return json_response({"reply": reply})
+    except Exception as e:
+        logger.error(f"Simulator AI error: {e}\n{traceback.format_exc()}")
+        return json_response({"error": str(e)}, 500)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
